@@ -50,7 +50,11 @@ def calculate_anatomical_data(
         raise e
 
     logger.info("Enforcing rigid bones...")
-    rigid_bones_data = enforce_rigid_bones_from_skeleton(skeleton=skeleton)
+    try:
+        rigid_bones_data = enforce_rigid_bones_from_skeleton(skeleton=skeleton)
+    except ValueError:
+        logger.warning("Rigid bones cannot be enforced for this tracking model")
+        rigid_bones_data = None
 
     return {
         "segment_COM": segment_COM_frame_imgPoint_XYZ,

@@ -57,6 +57,7 @@ def run_image_tracking_pipeline(
             ),
             output_data_folder_path=Path(processing_parameters.recording_info_model.output_data_folder_path)
             / RAW_DATA_FOLDER_NAME,
+            annotated_videos_folder_path=Path(processing_parameters.recording_info_model.annotated_videos_folder_path),
             kill_event=kill_event,
             use_tqdm=use_tqdm,
         )
@@ -79,6 +80,7 @@ def run_image_tracking(
     tracking_params: BaseTrackingParams,
     synchronized_videos_folder_path: Path,
     output_data_folder_path: Path,
+    annotated_videos_folder_path: Path = None,
     kill_event: multiprocessing.Event = None,
     use_tqdm: bool = True,
 ):
@@ -91,7 +93,7 @@ def run_image_tracking(
         tracking_params=tracking_params,
         synchronized_video_path=synchronized_videos_folder_path,
         output_folder_path=output_data_folder_path,
-        annotated_video_path=None,
+        annotated_video_path=annotated_videos_folder_path,
         num_processes=tracking_params.num_processes,
     )
 

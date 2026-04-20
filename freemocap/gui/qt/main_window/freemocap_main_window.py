@@ -2,6 +2,7 @@ import logging
 import multiprocessing
 import shutil
 import threading
+import numpy as np
 from pathlib import Path
 from typing import Union, List, Callable
 
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
 )
 from skelly_viewer import SkellyViewer
+from skelly_viewer.utilities.mediapipe_skeleton_builder import build_skeleton, mediapipe_indices, mediapipe_connections
 from skellycam import (
     SkellyCamParameterTreeWidget,
     SkellyCamWidget,
@@ -184,6 +186,10 @@ class MainWindow(QMainWindow):
             )
 
     def _handle_processing_finished_signal(self):
+        # Update the active tracker in the recording info model from the panel's selection
+        session_params = self._process_motion_capture_data_panel._create_session_parameter_model()
+        self._active_recording_info_widget.active_recording_info.active_tracker = session_params.tracking_model_info.name
+        
         self._update_skelly_viewer_widget()
         if self._controller_group_box.auto_open_in_blender_checked and not self._kill_thread_event.is_set():
             logger.info("'Auto Open in Blender' checkbox is checked - triggering 'Create Blender Scene'")
@@ -371,8 +377,10 @@ class MainWindow(QMainWindow):
         active_recording_info = self._active_recording_info_widget.active_recording_info
 
         if active_recording_info.data3d_status_check:
-            self._skelly_viewer_widget.load_skeleton_data(
-                mediapipe_skeleton_npy_path=active_recording_info.data_3d_npy_file_path
+            self._load_generic_skeleton_data(
+                skelly_viewer=self._skelly_viewer_widget,
+                npy_path=active_recording_info.data_3d_npy_file_path,
+                recording_info=active_recording_info
             )
 
         if active_recording_info.data2d_status_check:
@@ -384,6 +392,71 @@ class MainWindow(QMainWindow):
             self._skelly_viewer_widget.generate_video_display(
                 video_folder_path=active_recording_info.synchronized_videos_folder_path
             )
+
+    def _load_generic_skeleton_data(self, skelly_viewer: SkellyViewer, npy_path: Union[str, Path], recording_info: RecordingInfoModel):
+        try:
+            data = np.load(str(npy_path))
+        except Exception as e:
+            logger.error(f"Could not load skeleton data from {npy_path}: {e}")
+            return
+
+        # Default to Mediapipe settings
+        indices = mediapipe_indices
+        connections = mediapipe_connections
+        
+        # Try to detect if it's an AprilTag model based on shape or name
+        num_points = data.shape[1]
+        is_apriltag = (recording_info.active_tracker == 'apriltag') or (num_points < 33)
+
+        if is_apriltag:
+            try:
+                # Reconstruct model info based on data shape
+                if num_points % 5 == 0:
+                    # Likely point_mode='both' (5 points per tag)
+                    num_tags = num_points // 5
+                    tag_ids = tuple(range(num_tags))
+                    from skellytracker.trackers.apriltag_tracker.apriltag_model_info import (
+                        april_tag_landmark_names, 
+                        april_tag_segment_connections
+                    )
+                    indices = april_tag_landmark_names(tag_ids, point_mode='both')
+                    raw_connections = april_tag_segment_connections(tag_ids, point_mode='both')
+                    connections = {name: [val['proximal'], val['distal']] for name, val in raw_connections.items()}
+                elif num_points % 4 == 0:
+                    # Likely corners
+                    num_tags = num_points // 4
+                    tag_ids = tuple(range(num_tags))
+                    from skellytracker.trackers.apriltag_tracker.apriltag_model_info import (
+                        april_tag_landmark_names, 
+                        april_tag_segment_connections
+                    )
+                    indices = april_tag_landmark_names(tag_ids, point_mode='corners')
+                    raw_connections = april_tag_segment_connections(tag_ids, point_mode='corners')
+                    connections = {name: [val['proximal'], val['distal']] for name, val in raw_connections.items()}
+                elif num_points == 1:
+                    # Single center
+                    tag_ids = (0,)
+                    from skellytracker.trackers.apriltag_tracker.apriltag_model_info import april_tag_landmark_names
+                    indices = april_tag_landmark_names(tag_ids, point_mode='center')
+                    connections = {}
+            except Exception as e:
+                logger.warning(f"Could not resolve dynamic AprilTag model info, falling back to defaults: {e}")
+
+        # Manually perform the work of load_skeleton_data but with our dynamic indices/connections
+        skeleton_view_widget = skelly_viewer._skeleton_view_widget
+        skeleton_view_widget._skeleton_3d_frame_marker_xyz = data
+        
+        try:
+            skeleton_view_widget._mediapipe_skeleton = build_skeleton(
+                skeleton_3d_frame_marker_xyz=data,
+                pose_estimation_markers_list=indices,
+                pose_estimation_connections_dict=connections
+            )
+            skeleton_view_widget._number_of_frames = data.shape[0]
+            skeleton_view_widget._initialize_3d_axes()
+            skeleton_view_widget.skeleton_data_loaded_signal.emit()
+        except Exception as e:
+            logger.error(f"Failed to build skeleton for viewer: {e}")
 
     def kill_running_threads_and_processes(self):
         logger.info("Killing running threads and processes... ")

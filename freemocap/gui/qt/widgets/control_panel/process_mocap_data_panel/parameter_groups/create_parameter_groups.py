@@ -1,7 +1,9 @@
+import logging
 from pyqtgraph.parametertree import Parameter
 from skellytracker.trackers.mediapipe_tracker.mediapipe_model_info import (
     MediapipeTrackingParams,
 )
+from skellytracker.trackers.apriltag_tracker.apriltag_tracking_params import AprilTagTrackingParams
 
 from freemocap.data_layer.recording_models.post_processing_parameter_models import (
     ProcessingParameterModel,
@@ -9,6 +11,8 @@ from freemocap.data_layer.recording_models.post_processing_parameter_models impo
     PostProcessingParametersModel,
     ButterworthFilterParametersModel,
 )
+
+logger = logging.getLogger(__name__)
 
 BUTTERWORTH_ORDER = "Order"
 
@@ -61,6 +65,15 @@ RUN_3D_TRIANGULATION_NAME = "Run 3d triangulation?"
 RUN_BUTTERWORTH_FILTER_NAME = "Run butterworth filter?"
 
 NUMBER_OF_PROCESSES_PARAMETER_NAME = "Max Number of Processes to Use"
+TRACKER_TYPE_NAME = "Selected Tracker"
+
+# AprilTag Parameters
+APRILTAG_TREE_NAME = "AprilTag"
+APRILTAG_TAG_IDS = "Tag IDs (space separated)"
+APRILTAG_POINT_MODE = "Point Mode"
+APRILTAG_FAMILIES = "Families"
+APRILTAG_NTHREADS = "Number of Threads"
+APRILTAG_QUAD_DECIMATE = "Quad Decimate"
 
 
 # TODO: figure out how to generalize this
@@ -144,6 +157,51 @@ def create_mediapipe_parameter_group(
                 tip="If true, the model will process each image independently, without tracking across frames."
                     "I think this is equivalent to setting `min_tracking_confidence` to 0.0"
                     "Variable name in `mediapipe` code: `static_image_mode`",
+            ),
+        ],
+    )
+
+
+def create_apriltag_parameter_group(
+    parameter_model: AprilTagTrackingParams,
+) -> Parameter:
+    return Parameter.create(
+        name=APRILTAG_TREE_NAME,
+        type="group",
+        children=[
+            dict(
+                name=APRILTAG_TAG_IDS,
+                type="str",
+                value=" ".join(map(str, parameter_model.tag_ids)),
+                tip="IDs of the tags to track, separated by spaces (e.g. '0 1 2').",
+            ),
+            dict(
+                name=APRILTAG_POINT_MODE,
+                type="list",
+                limits=["corners", "center", "both"],
+                value=parameter_model.point_mode,
+                tip="Track four corners per tag, a single center per tag, or both.",
+            ),
+            dict(
+                name=APRILTAG_FAMILIES,
+                type="str",
+                value=parameter_model.families,
+                tip="AprilTag family to use (e.g. 'tag36h11').",
+            ),
+            dict(
+                name=APRILTAG_NTHREADS,
+                type="int",
+                value=parameter_model.nthreads,
+                limits=(1, 16),
+                tip="Number of threads for the detector.",
+            ),
+            dict(
+                name=APRILTAG_QUAD_DECIMATE,
+                type="float",
+                value=parameter_model.quad_decimate,
+                step=0.1,
+                limits=(0.0, 10.0),
+                tip="Decimate input image by this factor (higher is faster, lower is more accurate).",
             ),
         ],
     )
@@ -239,8 +297,10 @@ def extract_parameter_model_from_parameter_tree(
 ) -> ProcessingParameterModel:
     parameter_values_dictionary = extract_processing_parameter_model_from_tree(parameter_object=parameter_object)
 
-    return ProcessingParameterModel(
-        tracking_parameters_model=MediapipeTrackingParams(
+    tracker_type = parameter_values_dictionary.get(TRACKER_TYPE_NAME, MEDIAPIPE_TREE_NAME)
+
+    if tracker_type == MEDIAPIPE_TREE_NAME:
+        tracking_params = MediapipeTrackingParams(
             mediapipe_model_complexity=get_integer_from_mediapipe_model_complexity(
                 parameter_values_dictionary[MEDIAPIPE_MODEL_COMPLEXITY]
             ),
@@ -255,7 +315,33 @@ def extract_parameter_model_from_parameter_tree(
                 parameter_values_dictionary[BOUNDING_BOX_BUFFER_METHOD]
             ),
             bounding_box_buffer_percentage=parameter_values_dictionary[BOUNDING_BOX_BUFFER_PERCENTAGE],
-        ),
+        )
+        from skellytracker.trackers.mediapipe_tracker.mediapipe_model_info import MediapipeModelInfo
+        model_info = MediapipeModelInfo()
+    elif tracker_type == APRILTAG_TREE_NAME:
+        tag_ids_str = parameter_values_dictionary[APRILTAG_TAG_IDS]
+        tag_ids = tuple(int(x) for x in tag_ids_str.split())
+        
+        tracking_params = AprilTagTrackingParams(
+            tag_ids=tag_ids,
+            point_mode=parameter_values_dictionary[APRILTAG_POINT_MODE],
+            families=parameter_values_dictionary[APRILTAG_FAMILIES],
+            nthreads=parameter_values_dictionary[APRILTAG_NTHREADS],
+            quad_decimate=parameter_values_dictionary[APRILTAG_QUAD_DECIMATE],
+            run_image_tracking=parameter_values_dictionary[RUN_IMAGE_TRACKING_NAME],
+            num_processes=parameter_values_dictionary[NUMBER_OF_PROCESSES_PARAMETER_NAME],
+        )
+        from skellytracker.trackers.apriltag_tracker.apriltag_model_info import april_tag_model_info_for
+        model_info = april_tag_model_info_for(tag_ids=tag_ids, point_mode=tracking_params.point_mode)
+    else:
+        logger.warning(f"Unknown tracker type: {tracker_type}. Defaulting to Mediapipe.")
+        # ... logic for default ...
+        tracking_params = MediapipeTrackingParams()
+        model_info = MediapipeModelInfo()
+
+    return ProcessingParameterModel(
+        tracking_parameters_model=tracking_params,
+        tracking_model_info=model_info,
         anipose_triangulate_3d_parameters_model=AniposeTriangulate3DParametersModel(
             run_reprojection_error_filtering=parameter_values_dictionary[RUN_REPROJECTION_ERROR_FILTERING],
             reprojection_error_confidence_cutoff=parameter_values_dictionary[REPROJECTION_ERROR_FILTER_THRESHOLD],

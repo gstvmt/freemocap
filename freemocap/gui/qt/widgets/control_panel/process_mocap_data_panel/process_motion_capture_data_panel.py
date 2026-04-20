@@ -18,6 +18,7 @@ from freemocap.gui.qt.utilities.save_and_load_gui_state import GuiState
 from freemocap.gui.qt.widgets.control_panel.calibration_control_panel import CalibrationControlPanel
 from freemocap.gui.qt.widgets.control_panel.process_mocap_data_panel.parameter_groups.create_parameter_groups import (
     create_mediapipe_parameter_group,
+    create_apriltag_parameter_group,
     create_3d_triangulation_parameter_group,
     create_post_processing_parameter_group,
     extract_parameter_model_from_parameter_tree,
@@ -25,7 +26,11 @@ from freemocap.gui.qt.widgets.control_panel.process_mocap_data_panel.parameter_g
     RUN_3D_TRIANGULATION_NAME,
     RUN_BUTTERWORTH_FILTER_NAME,
     NUMBER_OF_PROCESSES_PARAMETER_NAME,
+    TRACKER_TYPE_NAME,
+    MEDIAPIPE_TREE_NAME,
+    APRILTAG_TREE_NAME,
 )
+from skellytracker.trackers.apriltag_tracker.apriltag_tracking_params import AprilTagTrackingParams
 from freemocap.gui.qt.workers.process_motion_capture_data_thread_worker import (
     ProcessMotionCaptureDataThreadWorker,
 )
@@ -114,6 +119,19 @@ class ProcessMotionCaptureDataPanel(QWidget):
         parameter_group = self._convert_session_processing_parameter_model_to_parameter_group(
             session_processing_parameter_model
         )
+
+        tracker_type_param = parameter_group.child("2d Image Trackers").child(TRACKER_TYPE_NAME)
+        mediapipe_group = parameter_group.child("2d Image Trackers").child(MEDIAPIPE_TREE_NAME)
+        apriltag_group = parameter_group.child("2d Image Trackers").child(APRILTAG_TREE_NAME)
+
+        def update_visibility():
+            val = tracker_type_param.value()
+            mediapipe_group.show(val == MEDIAPIPE_TREE_NAME)
+            apriltag_group.show(val == APRILTAG_TREE_NAME)
+
+        tracker_type_param.sigValueChanged.connect(update_visibility)
+        update_visibility()
+
         parameter_tree_widget.setParameters(parameter_group, showTop=False)
         parameter_tree_widget.setObjectName("parameter-tree-widget")
         return parameter_group
@@ -132,7 +150,14 @@ class ProcessMotionCaptureDataPanel(QWidget):
                     children=[
                         self._create_new_run_this_step_parameter(run_step_name=RUN_IMAGE_TRACKING_NAME),
                         self._create_num_processes_parameter(),
+                        dict(
+                            name=TRACKER_TYPE_NAME,
+                            type="list",
+                            limits=[MEDIAPIPE_TREE_NAME, APRILTAG_TREE_NAME],
+                            value=MEDIAPIPE_TREE_NAME,
+                        ),
                         create_mediapipe_parameter_group(session_processing_parameter_model.tracking_parameters_model),
+                        create_apriltag_parameter_group(AprilTagTrackingParams()),
                     ],
                     tip="Methods for tracking 2d points in images (e.g. mediapipe, deeplabcut(TODO), openpose(TODO), etc ...)",
                 ),
@@ -239,23 +264,35 @@ class ProcessMotionCaptureDataPanel(QWidget):
             selected_camera_calibration_toml_path = self._calibration_control_panel.calibration_toml_path
             session_parameter_model.recording_info_model.calibration_toml_path = selected_camera_calibration_toml_path
 
-            # check if there is already a calibration toml  in the recording folder, if not save this one there
-            if (
-                len(list(Path(session_parameter_model.recording_info_model.path).glob("*.toml"))) == 0
-                and Path(selected_camera_calibration_toml_path).exists()
-            ):
-                # copy the calibration toml to the recording folder (keeping the original filename)
-                logger.info(
-                    f"Copying calibration toml from {selected_camera_calibration_toml_path} to {session_parameter_model.recording_info_model.path}"
-                )
-                Path(session_parameter_model.recording_info_model.path).mkdir(parents=True, exist_ok=True)
-                copied_toml_path = (
-                    Path(session_parameter_model.recording_info_model.path)
-                    / Path(selected_camera_calibration_toml_path).name
-                )
-                shutil.copyfile(selected_camera_calibration_toml_path, copied_toml_path)
+        # Cleanup old results to avoid mixing tracker visualizations
+        annotated_path = Path(session_parameter_model.recording_info_model.annotated_videos_folder_path)
+        if annotated_path.exists():
+            import shutil
+            logger.info(f"Clearing old annotated videos at {annotated_path}")
+            shutil.rmtree(annotated_path)
+            annotated_path.mkdir(parents=True, exist_ok=True)
+            
+        # Also ensure we set the correct tracker name in the model before launching
+        session_parameter_model.recording_info_model.active_tracker = session_parameter_model.tracking_model_info.name
 
-        # set active tracker in recording model to the currently selected tracker
+        # check if there is already a calibration toml  in the recording folder, if not save this one there
+        if (
+            session_parameter_model.recording_info_model.single_video_check is False
+            and len(list(Path(session_parameter_model.recording_info_model.path).glob("*.toml"))) == 0
+            and Path(selected_camera_calibration_toml_path).exists()
+        ):
+            # copy the calibration toml to the recording folder (keeping the original filename)
+            logger.info(
+                f"Copying calibration toml from {selected_camera_calibration_toml_path} to {session_parameter_model.recording_info_model.path}"
+            )
+            Path(session_parameter_model.recording_info_model.path).mkdir(parents=True, exist_ok=True)
+            copied_toml_path = (
+                Path(session_parameter_model.recording_info_model.path)
+                / Path(selected_camera_calibration_toml_path).name
+            )
+            import shutil
+            shutil.copyfile(selected_camera_calibration_toml_path, copied_toml_path)
+
         session_parameter_model.recording_info_model.active_tracker = session_parameter_model.tracking_model_info.name
 
         self._process_motion_capture_data_thread_worker = ProcessMotionCaptureDataThreadWorker(
