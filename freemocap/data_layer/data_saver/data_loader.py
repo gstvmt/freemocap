@@ -324,7 +324,7 @@ class DataLoader:
 
     def _set_reprojection_error_point_names(self) -> None:
         landmark_names = []
-        landmark_names.extend(self._model_info.body_landmark_names)
+        landmark_names.extend(getattr(self._model_info, "body_landmark_names", self._model_info.landmark_names))
 
         if self.include_hands:
             right_hand_names = [f"right_{i:04d}" for i in range(21)]

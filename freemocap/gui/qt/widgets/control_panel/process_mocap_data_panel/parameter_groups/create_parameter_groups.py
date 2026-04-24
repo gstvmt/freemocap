@@ -297,7 +297,7 @@ def extract_parameter_model_from_parameter_tree(
 ) -> ProcessingParameterModel:
     parameter_values_dictionary = extract_processing_parameter_model_from_tree(parameter_object=parameter_object)
 
-    tracker_type = parameter_values_dictionary.get(TRACKER_TYPE_NAME, MEDIAPIPE_TREE_NAME)
+    tracker_type = parameter_values_dictionary.get(TRACKER_TYPE_NAME, APRILTAG_TREE_NAME)
 
     if tracker_type == MEDIAPIPE_TREE_NAME:
         tracking_params = MediapipeTrackingParams(

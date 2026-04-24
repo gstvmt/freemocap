@@ -154,7 +154,7 @@ class ProcessMotionCaptureDataPanel(QWidget):
                             name=TRACKER_TYPE_NAME,
                             type="list",
                             limits=[MEDIAPIPE_TREE_NAME, APRILTAG_TREE_NAME],
-                            value=MEDIAPIPE_TREE_NAME,
+                            value=APRILTAG_TREE_NAME,
                         ),
                         create_mediapipe_parameter_group(session_processing_parameter_model.tracking_parameters_model),
                         create_apriltag_parameter_group(AprilTagTrackingParams()),
