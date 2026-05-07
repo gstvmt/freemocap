@@ -25,7 +25,15 @@ def get_charuco_x_and_y_idx(number_of_squares_width: int, number_of_squares_heig
 
 
 def get_unit_vector(vector: np.ndarray) -> np.ndarray:
-    return vector / np.linalg.norm(vector)
+    norm = np.linalg.norm(vector)
+    if norm < 1e-10 or np.isnan(norm):
+        raise ValueError(
+            f"Cannot compute unit vector: vector has zero or NaN norm "
+            f"(norm={norm}, vector={vector}). "
+            f"The selected 'still frame' likely has NaN ChArUco corners — "
+            f"try holding the board more steadily at the start of calibration."
+        )
+    return vector / norm
 
 
 def compute_basis_vectors_of_new_reference(
@@ -36,6 +44,15 @@ def compute_basis_vectors_of_new_reference(
     idx_x, idx_y = get_charuco_x_and_y_idx(
         number_of_squares_width=number_of_squares_width, number_of_squares_height=number_of_squares_height
     )
+
+    # Validate that required corners are not NaN before computing vectors
+    required = {"origin (idx=0)": origin, f"x corner (idx={idx_x})": charuco_frame[idx_x], f"y corner (idx={idx_y})": charuco_frame[idx_y]}
+    for name, pt in required.items():
+        if np.any(np.isnan(pt)):
+            raise CharucoVisibilityError(
+                f"ChArUco corner {name} is NaN in the selected still frame — "
+                f"the board was not fully visible. Try holding it closer and more stably."
+            )
 
     x_vec = charuco_frame[idx_x] - origin
     y_vec = charuco_frame[idx_y] - origin

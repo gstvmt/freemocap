@@ -15,9 +15,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QWidget,
     QHBoxLayout,
+    QSlider,
 )
+from PySide6.QtCore import Qt, Slot, QTimer, QThread, Signal
 from skelly_viewer import SkellyViewer
 from skelly_viewer.utilities.mediapipe_skeleton_builder import build_skeleton, mediapipe_indices, mediapipe_connections
+from freemocap.gui.qt.widgets.skeleton_view_with_ellipsoids import SkeletonViewWithEllipsoids
+from freemocap.core_processes.capture_volume_calibration.uncertainty_ellipsoid import compute_uncertainty_for_all_frames
+from freemocap.core_processes.capture_volume_calibration.anipose_camera_calibration.get_anipose_calibration_object import load_anipose_calibration_toml_from_path
 from skellycam import (
     SkellyCamParameterTreeWidget,
     SkellyCamWidget,
@@ -62,6 +67,7 @@ from freemocap.gui.qt.widgets.directory_view_widget import DirectoryViewWidget
 from freemocap.gui.qt.widgets.home_widget import (
     HomeWidget,
 )
+from freemocap.gui.qt.widgets.point_position_table_widget import PointPositionTableWidget
 from freemocap.gui.qt.widgets.import_videos_wizard import ImportVideosWizard
 from freemocap.gui.qt.widgets.log_view_widget import LogViewWidget
 from freemocap.gui.qt.widgets.opencv_conflict_dialog import OpencvConflictDialog
@@ -89,6 +95,31 @@ from freemocap.utilities.remove_empty_directories import remove_empty_directorie
 EXIT_CODE_REBOOT = -123456789
 
 logger = logging.getLogger(__name__)
+
+
+class UncertaintyWorker(QThread):
+    finished = Signal(list)
+    error = Signal(str)
+
+    def __init__(self, cgroup, image_2d_data, sigma_pixels, subsample_frames):
+        super().__init__()
+        self.cgroup = cgroup
+        self.image_2d_data = image_2d_data
+        self.sigma_pixels = sigma_pixels
+        self.subsample_frames = subsample_frames
+
+    def run(self):
+        try:
+            from freemocap.core_processes.capture_volume_calibration.uncertainty_ellipsoid import compute_uncertainty_for_all_frames
+            ellipsoids = compute_uncertainty_for_all_frames(
+                cgroup=self.cgroup,
+                image_2d_data=self.image_2d_data,
+                sigma_pixels=self.sigma_pixels,
+                subsample_frames=self.subsample_frames,
+            )
+            self.finished.emit(ellipsoids)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class MainWindow(QMainWindow):
@@ -190,7 +221,12 @@ class MainWindow(QMainWindow):
         session_params = self._process_motion_capture_data_panel._create_session_parameter_model()
         self._active_recording_info_widget.active_recording_info.active_tracker = session_params.tracking_model_info.name
         
-        self._update_skelly_viewer_widget()
+        logger.info("Processamento de dados concluído. Agendando atualização da interface e elipsoídes...")
+        
+        # O atraso ajuda a garantir que a thread de processamento anterior 
+        # tenha tempo de fechar completamente antes de começarmos cálculos pesados
+        QTimer.singleShot(500, self._update_skelly_viewer_widget)
+        
         if self._controller_group_box.auto_open_in_blender_checked and not self._kill_thread_event.is_set():
             logger.info("'Auto Open in Blender' checkbox is checked - triggering 'Create Blender Scene'")
             self._export_active_recording_to_blender()
@@ -245,12 +281,53 @@ class MainWindow(QMainWindow):
 
         self._skelly_viewer_widget = SkellyViewer()
 
+        # Swap SkeletonViewWidget with SkeletonViewWithEllipsoids inside the Qt layout.
+        # Just reassigning _skeleton_view_widget is NOT enough — the old widget stays
+        # in the layout and the new one is never displayed. We must replace it in-place.
+        old_sv = self._skelly_viewer_widget._skeleton_view_widget
+        new_sv = SkeletonViewWithEllipsoids()
+        new_sv.setFixedSize(old_sv.size())
+
+        def _replace_widget_in_layout(layout, old_w, new_w) -> bool:
+            """Recursively search nested layouts and replace old_w with new_w."""
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item.widget() is old_w:
+                    layout.replaceWidget(old_w, new_w)
+                    old_w.setParent(None)
+                    return True
+                if item.layout():
+                    if _replace_widget_in_layout(item.layout(), old_w, new_w):
+                        return True
+            return False
+
+        replaced = _replace_widget_in_layout(self._skelly_viewer_widget.layout(), old_sv, new_sv)
+        if not replaced:
+            logger.warning("Could not replace SkeletonViewWidget in layout — ellipsoids may not be visible")
+
+        self._skelly_viewer_widget._skeleton_view_widget = new_sv
+
+        # Reconnect the signal that SkellyViewer uses to react to new data
+        new_sv.skeleton_data_loaded_signal.connect(
+            self._skelly_viewer_widget._handle_data_loaded_signal
+        )
+
+        self._point_position_table_widget = PointPositionTableWidget(parent=self)
+
+        # Connect slider signal
+        slider = self._skelly_viewer_widget.findChild(QSlider)
+        if slider:
+            slider.valueChanged.connect(self._point_position_table_widget.update_table)
+        else:
+            logger.warning("Could not find frame slider in SkellyViewer")
+
         center_tab_widget = CentralTabWidget(
             parent=self,
             skelly_cam_widget=self._skellycam_widget,
             camera_controller_widget=self._controller_group_box,
             welcome_to_freemocap_widget=self._home_widget,
             skelly_viewer_widget=self._skelly_viewer_widget,
+            point_position_table_widget=self._point_position_table_widget,
             directory_view_widget=self._directory_view_widget,
             active_recording_info_widget=self._active_recording_info_widget,
         )
@@ -455,8 +532,93 @@ class MainWindow(QMainWindow):
             skeleton_view_widget._number_of_frames = data.shape[0]
             skeleton_view_widget._initialize_3d_axes()
             skeleton_view_widget.skeleton_data_loaded_signal.emit()
+
+            self._point_position_table_widget.set_data(data, indices)
         except Exception as e:
             logger.error(f"Failed to build skeleton for viewer: {e}")
+
+        # Calcula e exibe as elipsoídes de incerteza (em thread separada para não travar a GUI)
+        try:
+            self._compute_and_load_ellipsoids(recording_info)
+        except Exception as e:
+            logger.warning(f"Não foi possível calcular elipsoídes de incerteza: {e}")
+
+    def _compute_and_load_ellipsoids(self, recording_info):
+        """
+        Carrega a calibração e os dados 2D, e inicia o cálculo das elipsoídes
+        em uma thread separada para não travar a GUI.
+        """
+        calibration_path = recording_info.calibration_toml_path
+        if not calibration_path or not Path(calibration_path).exists():
+            logger.warning("Arquivo de calibração não encontrado — elipsoídes não serão calculadas.")
+            return
+
+        # Encontra o arquivo de dados 2D usando o padrão de nomenclatura do freemocap
+        from freemocap.system.paths_and_filenames.file_and_folder_names import DATA_2D_NPY_FILE_NAME, OLD_DATA_2D_NPY_FILE_NAME
+        raw_data_path = Path(recording_info.raw_data_folder_path)
+        tracker_prefix = getattr(recording_info, "active_tracker", "") or ""
+
+        # Tenta o arquivo com prefixo do tracker, depois sem prefixo, depois o formato antigo
+        candidates = [
+            raw_data_path / f"{tracker_prefix}_{DATA_2D_NPY_FILE_NAME}",
+            raw_data_path / DATA_2D_NPY_FILE_NAME,
+            raw_data_path / OLD_DATA_2D_NPY_FILE_NAME,
+        ]
+        npy_2d_path = next((p for p in candidates if p.exists()), None)
+        if npy_2d_path is None:
+            npy_2d_files = list(raw_data_path.glob("*2dData*.npy"))
+            npy_2d_path = npy_2d_files[0] if npy_2d_files else None
+        
+        if npy_2d_path is None:
+            logger.warning("Arquivo de dados 2D não encontrado.")
+            return
+        logger.info(f"Calculando elipsoídes de incerteza usando: {npy_2d_path.name}")
+
+        image_2d_data = np.load(str(npy_2d_path))
+        # Garante shape [n_cams, n_frames, n_points, 2]
+        if image_2d_data.ndim == 4 and image_2d_data.shape[-1] >= 2:
+            image_2d_data = image_2d_data[:, :, :, :2]
+        else:
+            return
+
+        cgroup = load_anipose_calibration_toml_from_path(calibration_path)
+
+        # Se já houver um cálculo rodando, para ele antes de começar o novo
+        if hasattr(self, "_uncertainty_thread") and self._uncertainty_thread.isRunning():
+            logger.info("Cancelando cálculo de incerteza anterior...")
+            self._uncertainty_thread.finished.disconnect()
+            self._uncertainty_thread.terminate()
+            self._uncertainty_thread.wait()
+
+        # Inicia o cálculo em thread separada
+        logger.info(f"Iniciando cálculo de incerteza (todos os frames) em background...")
+        self._uncertainty_thread = UncertaintyWorker(
+            cgroup=cgroup,
+            image_2d_data=image_2d_data,
+            sigma_pixels=3.0,
+            subsample_frames=1,
+        )
+        self._uncertainty_thread.finished.connect(self._handle_uncertainty_finished)
+        self._uncertainty_thread.error.connect(lambda e: logger.warning(f"Erro no cálculo de incerteza: {e}"))
+        self._uncertainty_thread.start()
+
+    @Slot(list)
+    def _handle_uncertainty_finished(self, ellipsoids):
+        skeleton_view = self._skelly_viewer_widget._skeleton_view_widget
+        if hasattr(skeleton_view, "set_uncertainty_ellipsoids"):
+            skeleton_view.set_uncertainty_ellipsoids(ellipsoids)
+            logger.info("Elipsoídes de incerteza calculadas e carregadas no viewer.")
+            
+            # Redesenha o frame atual
+            try:
+                slider = self._skelly_viewer_widget.findChild(QSlider)
+                current_frame = slider.value() if slider is not None else 0
+                skeleton_view.update_skeleton_plot(current_frame)
+            except Exception:
+                pass
+        else:
+            logger.warning("O viewer 3D não suporta elipsoídes.")
+
 
     def kill_running_threads_and_processes(self):
         logger.info("Killing running threads and processes... ")
@@ -464,6 +626,12 @@ class MainWindow(QMainWindow):
             self._skellycam_widget.close()
         except Exception as e:
             logger.error(f"Error killing running threads and processes: {e}")
+
+        # Finaliza a thread de incerteza se ela existir
+        if hasattr(self, "_uncertainty_thread") and self._uncertainty_thread.isRunning():
+            logger.info("Finalizando thread de incerteza...")
+            self._uncertainty_thread.terminate()
+            self._uncertainty_thread.wait()
 
         self._kill_thread_event.set()
 

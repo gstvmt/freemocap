@@ -1,7 +1,7 @@
 import logging
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QVBoxLayout, QWidget, QLabel, QTabWidget
+from PySide6.QtWidgets import QVBoxLayout, QWidget, QLabel, QTabWidget, QSplitter
 
 # from skelly_viewer import SkellyViewer
 from skellycam import SkellyCamWidget
@@ -20,6 +20,7 @@ class CentralTabWidget(QTabWidget):
         camera_controller_widget: QWidget,
         welcome_to_freemocap_widget: HomeWidget,
         skelly_viewer_widget: QWidget,
+        point_position_table_widget: QWidget,
         directory_view_widget: QWidget,
         active_recording_info_widget: QWidget,
         parent=None,
@@ -33,6 +34,7 @@ class CentralTabWidget(QTabWidget):
         self._camera_controller_widget = camera_controller_widget
         self._welcome_to_freemocap_widget = welcome_to_freemocap_widget
         self._skelly_viewer_widget = skelly_viewer_widget
+        self._point_position_table_widget = point_position_table_widget
         self._directory_view_widget = directory_view_widget
         self._active_recording_info_widget = active_recording_info_widget
 
@@ -82,7 +84,15 @@ class CentralTabWidget(QTabWidget):
 
     def _create_skelly_viewer_tab(self, tab_widget: QTabWidget):
         logger.debug("Creating export_data tab")
-        tab_widget.addTab(self._skelly_viewer_widget, "Data Viewer")
+
+        self._skelly_viewer_splitter = QSplitter(Qt.Horizontal)
+        self._skelly_viewer_splitter.addWidget(self._skelly_viewer_widget)
+        self._skelly_viewer_splitter.addWidget(self._point_position_table_widget)
+
+        # Set initial sizes for the splitter
+        self._skelly_viewer_splitter.setSizes([700, 300])
+
+        tab_widget.addTab(self._skelly_viewer_splitter, "Data Viewer")
         # tab_widget.setToolTip(skelly_viewer.__repo_url__)
 
     def _create_directory_view_tab(self, tab_widget: QTabWidget):

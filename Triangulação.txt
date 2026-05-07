@@ -1,0 +1,24 @@
+Dados 2D por câmera
+       ↓
+get_triangulated_data()   ← pipeline_functions/triangulation_pipeline_functions.py
+       ↓
+triangulate_3d_data()     ← capture_volume_calibration/triangulate_3d_data.py
+       ↓
+anipose_calibration_object.triangulate()   ← biblioteca Anipose (CameraGroup)
+       ↓
+Dados 3D (frames × pontos × XYZ)
+       ↓
+run_reprojection_error_filtering()  ← filtragem + retriangulação opcional
+
+
+
+
+triangulate_3d_data()
+    ├── anipose.triangulate(data2d_flat)     → data3d_flat  [n_pontos, 3]
+    ├── reprojection_error(mean=True)        → erro médio   [n_frames, n_pontos]
+    └── reprojection_error(mean=False)       → erro por cam [n_cams, n_frames, n_pontos]
+                    ↓
+         salvo em 2 arquivos .npy
+                    ↓
+    run_reprojection_error_filtering()
+        → pontos com erro alto → NaN → retriangulados

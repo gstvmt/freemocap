@@ -1,0 +1,2 @@
+python explorar_erro_reprojecao.py --path ~/freemocap_data/recording_sessions/session_2026-05-01_21_18_58/recording_21_32_34_gmt-3/output_data/raw_data/
+
